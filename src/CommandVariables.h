@@ -21,6 +21,7 @@ enum class CommandVariables : uint8
 	Dir_NoTrailingSlash,
 	Path,
 	Repo,
+	Fnv1a32,
 	_Count
 };
 
@@ -34,6 +35,7 @@ constexpr StringView gToStringView(CommandVariables inVar)
 		"Dir_NoTrailingSlash",
 		"Path",
 		"Repo",
+		"Fnv1a32"
 	};
 	static_assert(gElemCount(cNames) == (size_t)CommandVariables::_Count);
 

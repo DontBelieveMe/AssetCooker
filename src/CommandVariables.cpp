@@ -308,6 +308,24 @@ REGISTER_TEST("ParseCommandVariableArgument")
 
 };
 
+namespace FxHash
+{
+	inline constexpr uint32_t Fnv1a32(const char* str, size_t len)
+	{
+		constexpr uint32_t PRIME		= 0x01000193;
+		constexpr uint32_t OFFSET_BASIS = 0x811c9dc5;
+
+		uint32_t		   hash			= OFFSET_BASIS;
+
+		for (size_t i = 0; i < len; ++i)
+		{
+			hash = hash ^ str[i];
+			hash = hash * PRIME;
+		}
+
+		return hash;
+	}
+}
 
 // Format inFormatStr into outString by calling inFormatter any time a CommandVariable is encountered.
 // Return true on success. Output is always an empty string on failure.
@@ -354,6 +372,52 @@ static bool sParseCommandVariables(StringView inFormatStr, taFormatter&& inForma
 
 			if (!inFormatter(CommandVariables::Repo, repo_name, slice, inFormatStr, out_string)) [[unlikely]]
 				return false; // Formatter says error.
+		}
+		else if (arg.StartsWith(gToStringView(CommandVariables::Fnv1a32)))
+		{
+			arg.RemovePrefix(gToStringView(CommandVariables::Fnv1a32).Size());
+
+			if (arg.Size() < 2 || arg[0] != ':') [[unlikely]]
+				return false; // Failed to get the repo name part.
+
+			StringView var_name = arg.SubStr(1);
+			bool matched = false;
+
+			for (int i = 0; i < (int)CommandVariables::_Count; ++i)
+			{
+				CommandVariables var = (CommandVariables)i;
+
+				if (var == CommandVariables::Repo)
+					continue; // Probably NA in this situation...
+
+				if (var_name == gToStringView(var))
+				{
+					char hash_string[32];
+					size_t hash_string_length = 0;
+
+					{
+						// Extra scope to ensure the actual command output "var_result" is destructed before trying
+						// to modify "out_string" (in order to resize which it needs to be the last allocation)
+
+						TempString var_result;
+						if (!inFormatter(var, "", slice, inFormatStr, var_result)) [[unlikely]]
+							return false; // Formatter says error.
+
+						const uint32_t hash = FxHash::Fnv1a32(var_result.AsCStr(), var_result.Size());
+						hash_string_length = snprintf(hash_string, sizeof(hash_string), "%x", hash);
+					}
+
+					out_string.Append(hash_string, hash_string_length);
+
+					matched = true;
+					break;
+				}
+			}
+
+			if (!matched) [[unlikely]]
+			{
+				return false;  // Invalid variable name.
+			}
 		}
 		else
 		{
@@ -501,7 +565,6 @@ REGISTER_TEST("ApplySlice")
 	TEST_TRUE(sApplySlice("test!", { 0, -10 }) == "");
 };
 
-
 static StringView sGetCommandVarString(CommandVariables inVar, const FileInfo& inFile)
 {
 	switch (inVar)
@@ -529,7 +592,8 @@ static StringView sGetCommandVarString(CommandVariables inVar, const FileInfo& i
 		return inFile.mPath;
 
 	case CommandVariables::Repo:
-		return {}; // Repo needs to be handled separately.
+	case CommandVariables::Fnv1a32:
+		return {}; // Needs to be handled separately.
 
 	default:
 		gAssert(false);
