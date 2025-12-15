@@ -190,8 +190,6 @@ FileID CookingCommand::GetDepFile() const
 
 void CookingCommand::UpdateDirtyState()
 {
-	// TODO there is no dedicated dirty state for the case where an output is outdated (ie. was not written), instead it's just an nondescript error and it's very confusing
-
 	// Dirty state should not be updated while still cooking!
 	gAssert(!mLastCookingLog || mLastCookingLog->mCookingState.Load() > CookingState::Cooking);
 
@@ -254,7 +252,12 @@ void CookingCommand::UpdateDirtyState()
 		// Note: if the last change USN is equal to the last cook USN, it means this output wasn't written (again) during last cook.
 		// See mLastCookUSN calculation including the previous outputs USNs in CookCommand.
 		if (file.mLastChangeUSN <= mLastCookUSN)
+		{
 			all_output_written = false;
+
+			if (!file.IsDeleted())
+				dirty_state |= OutputOutdated;
+		}
 	}
 	
 	if (all_output_missing)
@@ -1245,6 +1248,7 @@ void CookingSystem::CookCommand(CookingCommand& ioCommand, CookingThread& ioThre
 
 	// Store the log output.
 	log_entry.mOutput = output_str.AsStringView();
+	gParseANSIColors(log_entry.mOutput, log_entry.mOutputFormatSpans);
 
 	if (!success)
 	{
@@ -1290,6 +1294,8 @@ void CookingSystem::CleanupCommand(CookingCommand& ioCommand, CookingThread& ioT
 	}
 
 	log_entry.mOutput       = output_str.AsStringView();
+	log_entry.mOutputFormatSpans.ClearAndFreeMemory();
+
 	log_entry.mTimeEnd      = gGetSystemTimeAsFileTime();
 
 	if (error)
@@ -1543,11 +1549,19 @@ bool CookingSystem::IsIdle() const
 				return false;
 	}
 
+	// If any command needs a dirty state update, we're not idle.
+	{
+		LockGuard lock(mCommandsQueuedForUpdateDirtyStateMutex);
+		if (!mCommandsQueuedForUpdateDirtyState.Empty())
+			return false;
+	}
+
 	// If we're still initializing, we're not idle.
 	if (gFileSystem.GetInitState() != FileSystem::InitState::Ready)
 		return false;
 
-	// TODO check if log is changed (don't need to redraw if filesystem isn't idle, unless it prints)
+	// Note: The filesystem monitoring might not be idle, but that's okay.
+	// If files we care about are modified, one of the tests above should catch it.
 
 	// Guess we're idle.
 	return true;
@@ -1561,7 +1575,7 @@ void CookingSystem::UpdateNotifications()
 	if (IsCookingPaused())
 		return;
 
-	size_t cooking_log_size = mCookingLog.SizeRelaxed();
+	int cooking_log_size = mCookingLog.SizeRelaxed();
 
 	// If no command was cooked since last time, nothing to do.
 	if (mLastNotifCookingLogSize == cooking_log_size)

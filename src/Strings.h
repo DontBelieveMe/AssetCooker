@@ -7,6 +7,7 @@
 
 #include "Core.h"
 
+#include <optional>
 #include <string_view>
 
 #include <Strings.h>
@@ -183,3 +184,17 @@ bool gStringViewToEnum(StringView inStrValue, taEnumType& outValue)
 
 	return false;
 }
+
+struct FormatColor
+{
+	uint8 r, g, b;
+};
+
+struct FormatSpan
+{
+	StringView			  mSpan;
+	Optional<FormatColor> mColor;
+};
+
+// Parse the string for ANSI escape sequences with color codes
+void gParseANSIColors(StringView inStr, Vector<FormatSpan>& outSpans);

@@ -133,6 +133,7 @@ struct CookingLogEntry
 	FileTime                  mTimeStart;
 	FileTime                  mTimeEnd;		// Unsafe to read unless CookingState is > Cooking. TODO add getters that assert this
 	StringView                mOutput;		// Unsafe to read unless CookingState is > Cooking.
+	Vector<FormatSpan>        mOutputFormatSpans; // Unsafe to read unless CookingState is > Cooking.
 };
 
 
@@ -149,16 +150,16 @@ struct CookingCommand : NoCopy
 	enum DirtyState : uint8
 	{
 		NotDirty               = 0,
-		InputMissing           = 0b0000001, // Inputs can be missing because they'll be created by an earlier command. If they're still missing by the time we try to cook, it's an error.
-		InputChanged           = 0b0000010,
-		OutputMissing          = 0b0000100,
-		AllStaticInputsMissing = 0b0001000, // Command needs to be cleaned up.
-		AllOutputsMissing      = 0b0010000,
-		Error                  = 0b0100000, // Last cook errored.
-		VersionMismatch        = 0b1000000, // Rule version changed.
+		InputMissing           = 0b00000001, // Inputs can be missing because they'll be created by an earlier command. If they're still missing by the time we try to cook, it's an error.
+		InputChanged           = 0b00000010,
+		OutputMissing          = 0b00000100, // Output file does not exist.
+		OutputOutdated         = 0b00001000, // Output file exists but was not written.
+		AllStaticInputsMissing = 0b00010000, // Command needs to be cleaned up.
+		AllOutputsMissing      = 0b00100000,
+		Error                  = 0b01000000, // Last cook errored.
+		VersionMismatch        = 0b10000000, // Rule version changed.
 	};
 
-	// TODO should also store last cook time here, so we can save it in the cached state (currently it's only in the log entries)
 	DirtyState                      mDirtyState          = NotDirty;
 	bool                            mIsQueued            = false;
 	uint16                          mLastCookRuleVersion = CookingRule::cInvalidVersion;
@@ -318,8 +319,8 @@ private:
 	StringPool                            mStringPool = { 64ull * 1024 };
 	VMemArray<CookingCommand>             mCommands;
 
-	VMemHashSet<CookingCommandID>         mCommandsQueuedForUpdateDirtyState;
-	Mutex                                 mCommandsQueuedForUpdateDirtyStateMutex;
+	VMemHashSet<CookingCommandID>		  mCommandsQueuedForUpdateDirtyState;
+	mutable Mutex						  mCommandsQueuedForUpdateDirtyStateMutex;
 
 	CookingQueue                          mCommandsDirty;	// All dirty commands.
 	CookingThreadsQueue                   mCommandsToCook;	// Commands that will get cooked by the cooking threads.
@@ -341,7 +342,7 @@ private:
 
 	AtomicInt32                           mCookingErrors           = 0; // Total number of commands that ended in error.
 	int                                   mLastNotifCookingErrors  = 0;
-	size_t                                mLastNotifCookingLogSize = 0;
+	int									  mLastNotifCookingLogSize = 0;
 	int64                                 mLastNotifTicks          = 0;
 
 	HashSet<CookingLogEntry*>             mTimeOutCurrentBatch;

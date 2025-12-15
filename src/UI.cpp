@@ -9,6 +9,7 @@
 #include "FileSystem.h"
 #include "CookingSystem.h"
 #include "CommandVariables.h"
+#include "Version.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_impl_dx11.h"
@@ -93,6 +94,32 @@ private:
 StaticStorageManager gUIStateManager;
 
 
+// Essentially the function to reload the config/rules files.
+static void sRestartAssetCooker()
+{
+	// Stop all the threads.
+	gFileSystem.StopMonitoring();
+
+	// Clear the UI state (don't keep lists of FileID, etc.)
+	gUIClearState();
+
+	// Destroy the globals.
+	gApp.Exit();
+	gFileSystem.~FileSystem();
+	gCookingSystem.~CookingSystem();
+
+	// Reset the UI start ticks, otherwise the "Init complete in %.2f seconds" message will be wrong.
+	gUIStartTicks = gGetTickCount();
+
+	// Recreate the globals.
+	gPlacementNew(gFileSystem);
+	gPlacementNew(gCookingSystem);
+
+	// Start again.
+	gApp.Init();
+}
+
+
 const char* gGetAnimatedHourglass()
 {
 	// TODO probably should redraw as long as this is used, because it's the sign that something still needs to update (but could also perhaps lead to accidentally always redrawing?)
@@ -158,47 +185,16 @@ float gUIGetUserScale()
 
 void gUIUpdate()
 {
-	
-
 	if (gUIScale.mNeedUpdate)
 	{
 		gUIScale.mNeedUpdate = false;
 
-		ImGui::GetStyle() = gStyle;
-		ImGui::GetStyle().ScaleAllSizes(gUIScale.GetFinalScale());
+		ImGuiStyle& style = ImGui::GetStyle();
 
-		auto& io = ImGui::GetIO();
-
-		// Remove all the font data.
-		io.Fonts->Clear();
-		// Release the DX11 objects (font textures, but also everything else... might not be the most efficient).
-		ImGui_ImplDX11_InvalidateDeviceObjects();
-
-		// Fonts are embedded in the exe, they don't need to be released.
-		ImFontConfig font_config; 
-		font_config.FontDataOwnedByAtlas = false;
-
-		// Reload the fonts at the new scale.
-		// The main font.
-		{
-			auto cousine_ttf = gGetEmbeddedFont("cousine_regular");
-			io.Fonts->AddFontFromMemoryTTF((void*)cousine_ttf.Data(), cousine_ttf.Size(), 14.0f * gUIScale.GetFinalScale(), &font_config);
-		}
-
-		// The icons font.
-		{
-			ImFontConfig icons_config          = font_config;
-			icons_config.MergeMode             = true; // Merge into the default font.
-			icons_config.GlyphOffset.y         = 0;
-
-			static const ImWchar icon_ranges[] = { ICON_MIN_FK, ICON_MAX_FK, 0 };
-
-			auto ttf_data = gGetEmbeddedFont("forkawesome");
-			io.Fonts->AddFontFromMemoryTTF((void*)ttf_data.Data(), ttf_data.Size(), 14.0f * gUIScale.GetFinalScale(), &icons_config, icon_ranges);
-		}
-
-		// Re-create the DX11 objects.
-		ImGui_ImplDX11_CreateDeviceObjects();
+		style = gStyle;
+		style.ScaleAllSizes(gUIScale.GetFinalScale());
+		style.FontScaleMain = gUIScale.mFromSettings;
+		style.FontScaleDpi = gUIScale.mFromDPI;
 	}
 }
 
@@ -206,6 +202,10 @@ void gUIClearState()
 {
 	// Reset all the static variables in the UI functions.
 	gUIStateManager.Clear();
+
+	// Reset the global variables that need it.
+	gSelectedCookingLogEntry   = {};
+	gFirstCookingLogEntryIndex = 0;
 }
 
 
@@ -241,28 +241,7 @@ void gDrawMainMenuBar()
 			ImGui::Separator();
 
 			if (ImGui::MenuItem("Restart " ICON_FK_UNDO))
-			{
-				// Stop all the threads.
-				gFileSystem.StopMonitoring();
-
-				// Clear the UI state (don't keep lists of FileID, etc.)
-				gUIClearState();
-
-				// Destroy the globals.
-				gApp.Exit();
-				gFileSystem.~FileSystem();
-				gCookingSystem.~CookingSystem();
-
-				// Reset the UI start ticks, otherwise the "Init complete in %.2f seconds" message will be wrong.
-				gUIStartTicks = gGetTickCount();
-
-				// Recreate the globals.
-				gPlacementNew(gFileSystem);
-				gPlacementNew(gCookingSystem);
-
-				// Start again.
-				gApp.Init();
-			}
+				sRestartAssetCooker();
 
 			if (ImGui::BeginItemTooltip())
 			{
@@ -347,6 +326,24 @@ void gDrawMainMenuBar()
 
 			if (ImGui::MenuItem("Crash now!"))
 				confirm_crash = true;
+
+			ImGui::EndMenu();
+		}
+
+		if (ImGui::BeginMenu("Help"))
+		{
+			if (ImGui::MenuItem("Github " ICON_FK_GITHUB, nullptr, nullptr))
+				ShellExecuteA(nullptr, "open", "https://github.com/jlaumon/AssetCooker", nullptr, nullptr, SW_SHOWDEFAULT);
+
+			if constexpr (!StringView(ASSET_COOKER_VER_FULL).Empty())
+			{
+				if (ImGui::MenuItem(gTempFormat("Version %s " ICON_FK_FILES_O, ASSET_COOKER_VER_FULL), nullptr, nullptr))
+				{
+					ImGui::LogToClipboard();
+					ImGui::LogText("%s", ASSET_COOKER_VER_FULL);
+					ImGui::LogFinish();
+				}
+			}
 
 			ImGui::EndMenu();
 		}
@@ -618,7 +615,7 @@ void gDrawFileInfo(const FileInfo& inFile, FileContext inContext = {})
 				ImGui::TableNextColumn(); ImGui::TextUnformatted(inFile.mLastChangeTime.ToString());
 				
 				ImGui::TableNextColumn(); ImGui::TextUnformatted("Last Change USN");
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(gTempFormat("%llu", inFile.mLastChangeUSN));
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(gUSNToString(inFile.mLastChangeUSN));
 			}
 
 			ImGui::EndTable();
@@ -695,6 +692,8 @@ void gDrawCookingCommandPopup(const CookingCommand& inCommand)
 					dirty_details.Append("Input Changed|");
 				if (inCommand.mDirtyState & CookingCommand::OutputMissing)
 					dirty_details.Append("Output Missing|");
+				if (inCommand.mDirtyState & CookingCommand::OutputOutdated)
+					dirty_details.Append("Output Outdated|");
 
 				// Replace the last | with )
 				dirty_details.Back() = ')'; 
@@ -730,7 +729,7 @@ void gDrawCookingCommandPopup(const CookingCommand& inCommand)
 		ImGui::TableNextColumn(); ImGui::TextUnformatted(inCommand.mLastCookTime.ToString());
 
 		ImGui::TableNextColumn(); ImGui::TextUnformatted("Last Cook USN");
-		ImGui::TableNextColumn(); ImGui::TextUnformatted(gTempFormat("%llu", inCommand.mLastCookUSN));
+		ImGui::TableNextColumn(); ImGui::TextUnformatted(gUSNToString(inCommand.mLastCookUSN));
 		
 		ImGui::EndTable();
 	}
@@ -1123,9 +1122,30 @@ void gDrawSelectedCookingLogEntry()
 		// If it's finished cooking, it's safe to read the log output.
 		if (log_entry.mCookingState.Load() > CookingState::Cooking)
 		{
-			//ImGui::PushTextWrapPos();
-			ImGui::TextUnformatted(log_entry.mOutput);
-			//ImGui::PopTextWrapPos();
+			if (log_entry.mOutputFormatSpans.Empty())
+			{
+				//ImGui::PushTextWrapPos();
+				ImGui::TextUnformatted(log_entry.mOutput);
+				//ImGui::PopTextWrapPos();
+			}
+			else
+			{
+				for (const FormatSpan& format_span : log_entry.mOutputFormatSpans)
+				{
+					if (format_span.mColor.has_value())
+					{
+						FormatColor color = format_span.mColor.value();
+						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, 1.0f));
+					}
+
+					ImGui::TextUnformatted(format_span.mSpan);
+
+					if (format_span.mColor.has_value())
+					{
+						ImGui::PopStyleColor();
+					}
+				}
+			}
 		}
 	}
 	ImGui::EndChild();
@@ -1736,6 +1756,32 @@ void gDrawMain()
 	{
 		// Do it just once though, otherwise we can't select other windows.
 		do_once { ImGui::SetWindowFocus(cWindowNameAppLog); };
+
+		// If the config file is missing, offer to go read the doc.
+		if (!gFileExists(gApp.mConfigFilePath) || !gFileExists(gApp.mRuleFilePath))
+			ImGui::OpenPopup("Getting Started?");
+
+		// Always center this window when appearing
+		ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+		ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+		if (ImGui::BeginPopupModal("Getting Started?", nullptr, ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove))
+		{
+			ImGui::TextUnformatted("You need to create Config.toml and Rules.toml.");
+			ImGui::TextUnformatted("Have a look at the docs!");
+			if (ImGui::Button("Let's go! " ICON_FK_EXTERNAL_LINK))
+			{
+				ShellExecuteA(nullptr, "open", "https://github.com/jlaumon/AssetCooker#getting-started", nullptr, nullptr, SW_SHOWDEFAULT);
+			}
+
+			ImGui::SetItemDefaultFocus();
+			ImGui::SameLine();
+
+			if (ImGui::Button("Reload", ImVec2(120, 0)))
+				sRestartAssetCooker();
+
+			ImGui::EndPopup();
+		}
 	}
 }
 
